@@ -1,9 +1,12 @@
 """Main FastAPI application for Course Description Similarity & Curriculum Gap Analyzer."""
+import os
 import logging
+from pathlib import Path
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse, HTMLResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.database import init_db, get_db_connection
 from app.sample_data import load_sample_data
@@ -52,8 +55,7 @@ origins = [
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
-    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -103,3 +105,26 @@ def health_check():
         "status": "healthy",
         "database": db_status,
     }
+
+
+# Serve React frontend build (for production / deployment)
+STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
+
+if STATIC_DIR.exists() and (STATIC_DIR / "index.html").exists():
+    # Serve static assets (JS/CSS/images)
+    app.mount("/assets", StaticFiles(directory=str(STATIC_DIR / "assets")), name="static-assets")
+
+    @app.get("/{full_path:path}", tags=["Frontend"])
+    async def serve_frontend(request: Request, full_path: str):
+        """Serve React SPA — all non-API routes fall through to index.html."""
+        # Don't interfere with /api or /docs
+        if full_path.startswith("api") or full_path.startswith("docs") or full_path.startswith("openapi"):
+            return JSONResponse(status_code=404, content={"detail": "Not found"})
+
+        # Try serving the exact file first
+        file_path = STATIC_DIR / full_path
+        if full_path and file_path.exists() and file_path.is_file():
+            return FileResponse(str(file_path))
+
+        # Fallback to index.html for SPA routing
+        return FileResponse(str(STATIC_DIR / "index.html"))
