@@ -3,18 +3,20 @@ Course Description Similarity & Curriculum Gap Analyzer
 Streamlit Cloud deployment - single-file app wrapping the NLP pipeline.
 """
 import json
-import io
-import csv
+import re
 import sqlite3
 from datetime import datetime
 from pathlib import Path
-from typing import List, Dict, Any
 
 import numpy as np
 import pandas as pd
+import plotly.graph_objects as go
 import streamlit as st
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
+
+# Default overlap threshold (matches the project report: 0.6)
+DEFAULT_THRESHOLD = 0.60
 
 # ──────────────────────────────────────────────────────────
 # Configuration
@@ -27,7 +29,7 @@ st.set_page_config(
 )
 
 # ──────────────────────────────────────────────────────────
-# Database helpers (SQLite in-memory for Streamlit Cloud)
+# Database helpers (SQLite for Streamlit Cloud)
 # ──────────────────────────────────────────────────────────
 DB_PATH = Path("courses.db")
 
@@ -154,8 +156,6 @@ load_sample_data()
 # ──────────────────────────────────────────────────────────
 # NLP Engine
 # ──────────────────────────────────────────────────────────
-import re
-
 def preprocess_text(text: str) -> str:
     if not text:
         return ""
@@ -186,15 +186,15 @@ def prepare_course_text(course: dict) -> str:
     return " ".join(parts)
 
 
-def compute_similarity(courses: list, threshold: float = 0.4):
+def compute_similarity(courses: list, threshold: float = DEFAULT_THRESHOLD):
     if len(courses) < 2:
-        return None, [], []
+        return None, [], [], []
 
     texts = [prepare_course_text(c) for c in courses]
     preprocessed = [preprocess_text(t) for t in texts]
 
     vectorizer = TfidfVectorizer(stop_words="english", ngram_range=(1, 2), sublinear_tf=True,
-                                  token_pattern=r"(?u)\b[a-zA-Z0-9_]{2,}\b")
+                                 token_pattern=r"(?u)\b[a-zA-Z0-9_]{2,}\b")
     tfidf_matrix = vectorizer.fit_transform(preprocessed)
     sim_matrix = cosine_similarity(tfidf_matrix)
     np.fill_diagonal(sim_matrix, 1.0)
@@ -205,14 +205,11 @@ def compute_similarity(courses: list, threshold: float = 0.4):
     for i in range(n):
         for j in range(i + 1, n):
             score = float(sim_matrix[i][j])
-            # Get common terms
             common = get_common_terms(texts[i], texts[j])
-            cid1 = courses[i].get("course_id", "")
-            cid2 = courses[j].get("course_id", "")
             pairs.append({
-                "course1": cid1,
+                "course1": courses[i].get("course_id", ""),
                 "course1_name": courses[i].get("name", ""),
-                "course2": cid2,
+                "course2": courses[j].get("course_id", ""),
                 "course2_name": courses[j].get("name", ""),
                 "similarity": round(score, 4),
                 "common_terms": common,
@@ -220,7 +217,7 @@ def compute_similarity(courses: list, threshold: float = 0.4):
     pairs.sort(key=lambda x: x["similarity"], reverse=True)
     high = [p for p in pairs if p["similarity"] >= threshold]
 
-    labels = [f"{c.get('course_id','')}: {c.get('name','')}" for c in courses]
+    labels = [f"{c.get('course_id', '')}: {c.get('name', '')}" for c in courses]
     return sim_matrix, pairs, high, labels
 
 
@@ -254,7 +251,7 @@ def analyze_gaps(courses: list, ref_topics: list):
 
     all_docs = cleaned_courses + cleaned_topics
     vectorizer = TfidfVectorizer(stop_words="english", ngram_range=(1, 2), sublinear_tf=True,
-                                  token_pattern=r"(?u)\b[a-zA-Z0-9_]{2,}\b")
+                                 token_pattern=r"(?u)\b[a-zA-Z0-9_]{2,}\b")
     try:
         tfidf_all = vectorizer.fit_transform(all_docs)
         courses_vec = tfidf_all[:len(courses)]
@@ -276,7 +273,9 @@ def analyze_gaps(courses: list, ref_topics: list):
                 rel = max(rel, 0.5)
                 max_score = max(max_score, rel)
             if rel >= 0.15:
-                matches.append({"course_id": courses[c_idx].get("course_id", ""), "course_name": courses[c_idx].get("name", ""), "relevance": round(rel, 3)})
+                matches.append({"course_id": courses[c_idx].get("course_id", ""),
+                                "course_name": courses[c_idx].get("name", ""),
+                                "relevance": round(rel, 3)})
         matches.sort(key=lambda m: m["relevance"], reverse=True)
 
         if max_score >= 0.30:
@@ -290,7 +289,7 @@ def analyze_gaps(courses: list, ref_topics: list):
 
 
 # ──────────────────────────────────────────────────────────
-# Helper: load courses from DB
+# Helpers: load data from DB, build heatmap
 # ──────────────────────────────────────────────────────────
 def get_courses_from_db():
     conn = get_conn()
@@ -322,23 +321,58 @@ def get_curricula_from_db():
     return curricula
 
 
+def build_heatmap(sim_matrix, labels, title, height=520, show_colorbar=True):
+    short_labels = [l.split(":")[0].strip() for l in labels]
+    fig = go.Figure(data=go.Heatmap(
+        z=sim_matrix, x=short_labels, y=short_labels,
+        colorscale=[[0, "#ecfdf5"], [0.15, "#a7f3d0"], [0.3, "#fbbf24"],
+                    [0.5, "#f97316"], [0.7, "#dc2626"], [1.0, "#4338ca"]],
+        text=np.round(sim_matrix * 100, 1).astype(str),
+        texttemplate="%{text}%", textfont={"size": 9},
+        zmin=0, zmax=1,
+        showscale=show_colorbar,
+        colorbar=dict(title="Similarity") if show_colorbar else None,
+    ))
+    fig.update_layout(
+        title=title, height=height, xaxis_tickangle=-45,
+        template="plotly_dark",
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        yaxis=dict(autorange="reversed"),
+    )
+    return fig
+
+
 # ──────────────────────────────────────────────────────────
-# Streamlit UI
+# Styling (dark-theme safe: no forced light backgrounds)
 # ──────────────────────────────────────────────────────────
-# Custom CSS
 st.markdown("""
 <style>
-    .stApp { background-color: #f8fafc; }
-    .metric-card { background: white; padding: 1.2rem; border-radius: 12px; border: 1px solid #e2e8f0; box-shadow: 0 1px 3px rgba(0,0,0,0.06); }
-    .metric-value { font-size: 2rem; font-weight: 700; color: #1e293b; }
-    .metric-label { font-size: 0.85rem; color: #64748b; margin-top: 0.2rem; }
-    .high-sim { background: #fef2f2; border: 1px solid #fecaca; padding: 0.8rem; border-radius: 8px; margin-bottom: 0.5rem; }
-    .med-sim { background: #fffbeb; border: 1px solid #fde68a; padding: 0.8rem; border-radius: 8px; margin-bottom: 0.5rem; }
-    .disclaimer { background: #eff6ff; border: 1px solid #bfdbfe; padding: 0.7rem; border-radius: 8px; font-size: 0.82rem; color: #1e40af; margin-top: 1rem; }
+    .stApp, [data-testid="stAppViewContainer"], [data-testid="stMain"] {
+        background-color: #0E1117 !important;
+    }
+    h1, h2, h3, h4, h5, h6, p, li, label, span, div[data-testid="stMarkdownContainer"] {
+        color: #E6EAF2;
+    }
+    [data-testid="stMetric"] {
+        background: #161B26; padding: 1rem; border-radius: 12px;
+        border: 1px solid #2A3142;
+    }
+    .high-sim {
+        background: rgba(239, 68, 68, 0.14); border: 1px solid rgba(239, 68, 68, 0.45);
+        color: #FECACA; padding: 0.8rem; border-radius: 8px; margin-bottom: 0.5rem;
+    }
+    .high-sim strong { color: #FFFFFF; }
+    .disclaimer {
+        background: rgba(59, 130, 246, 0.14); border: 1px solid rgba(59, 130, 246, 0.45);
+        color: #BFDBFE; padding: 0.7rem; border-radius: 8px;
+        font-size: 0.85rem; margin-top: 1rem;
+    }
 </style>
 """, unsafe_allow_html=True)
 
+# ──────────────────────────────────────────────────────────
 # Sidebar
+# ──────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("### 🎓 Gap Analyzer")
     st.markdown("---")
@@ -357,7 +391,7 @@ curricula_list = get_curricula_from_db()
 # ─── Dashboard ───
 if page == "📊 Dashboard":
     st.title("📊 Curriculum Intelligence Dashboard")
-    st.caption("Real-time overview of course similarities, curriculum coverage, and recommendations.")
+    st.caption("Overview of course similarities, curriculum coverage, and recommendations.")
 
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Total Courses", len(courses_list))
@@ -368,32 +402,20 @@ if page == "📊 Dashboard":
 
     if len(courses_list) >= 2:
         st.markdown("### Quick Similarity Preview")
-        result = compute_similarity(courses_list, 0.4)
-        if result and result[0] is not None:
-            sim_matrix, pairs, high, labels = result
-            st.info(f"**{len(high)}** high-overlap course pairs detected (≥40% similarity)")
+        sim_matrix, pairs, high, labels = compute_similarity(courses_list, DEFAULT_THRESHOLD)
+        st.info(f"**{len(high)}** high-overlap course pairs detected (≥{int(DEFAULT_THRESHOLD * 100)}% similarity)")
 
-            # Heatmap
-            import plotly.graph_objects as go
-            short_labels = [l.split(":")[0].strip() for l in labels]
-            fig = go.Figure(data=go.Heatmap(
-                z=sim_matrix, x=short_labels, y=short_labels,
-                colorscale=[[0, '#ecfdf5'], [0.15, '#a7f3d0'], [0.3, '#fbbf24'], [0.5, '#f97316'], [0.7, '#dc2626'], [1.0, '#4338ca']],
-                text=np.round(sim_matrix * 100, 1).astype(str),
-                texttemplate="%{text}%", textfont={"size": 9},
-                zmin=0, zmax=1, colorbar=dict(title="Similarity"),
-            ))
-            fig.update_layout(title="Course Similarity Heatmap", height=500, xaxis_tickangle=-45)
-            st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(build_heatmap(sim_matrix, labels, "Course Similarity Heatmap"),
+                        use_container_width=True)
 
-            if high:
-                st.markdown("### ⚠️ High-Overlap Alerts")
-                for p in high[:5]:
-                    st.markdown(f"""<div class="high-sim">
-                    <strong>{p['course1']} ({p['course1_name']})</strong> ↔ <strong>{p['course2']} ({p['course2_name']})</strong>
-                    — <strong>{p['similarity']*100:.1f}%</strong> similarity
-                    {' • Common: ' + ', '.join(p['common_terms'][:4]) if p['common_terms'] else ''}
-                    </div>""", unsafe_allow_html=True)
+        if high:
+            st.markdown("### ⚠️ High-Overlap Alerts")
+            for p in high[:5]:
+                common = (" • Common: " + ", ".join(p["common_terms"][:4])) if p["common_terms"] else ""
+                st.markdown(f"""<div class="high-sim">
+                <strong>{p['course1']} ({p['course1_name']})</strong> ↔ <strong>{p['course2']} ({p['course2_name']})</strong>
+                — <strong>{p['similarity'] * 100:.1f}%</strong> similarity{common}
+                </div>""", unsafe_allow_html=True)
     else:
         st.info("Add at least 2 courses to see similarity analysis.")
 
@@ -406,7 +428,9 @@ elif page == "📚 Courses":
     with tab1:
         if courses_list:
             search = st.text_input("🔍 Search courses", "")
-            filtered = [c for c in courses_list if search.lower() in c["name"].lower() or search.lower() in c["course_id"].lower() or search.lower() in c["department"].lower()] if search else courses_list
+            s = search.lower()
+            filtered = [c for c in courses_list
+                        if s in c["name"].lower() or s in c["course_id"].lower() or s in c["department"].lower()] if search else courses_list
             for c in filtered:
                 topics = c["syllabus_topics"] if isinstance(c["syllabus_topics"], list) else []
                 with st.expander(f"**{c['course_id']}** — {c['name']} ({c['department']}, {c['semester']})"):
@@ -450,7 +474,7 @@ elif page == "📚 Courses":
                         conn.close()
 
     with tab3:
-        st.markdown("Upload a CSV file with columns: `course_id, name, department, semester, description, syllabus_topics`")
+        st.markdown("Upload a CSV file with columns: `course_id, name, department, semester, description, syllabus_topics` (topics separated by `;`)")
         uploaded = st.file_uploader("Upload CSV", type=["csv"])
         if uploaded:
             df = pd.read_csv(uploaded)
@@ -460,7 +484,8 @@ elif page == "📚 Courses":
                 imported = 0
                 for _, row in df.iterrows():
                     try:
-                        topics = str(row.get("syllabus_topics", "")).split(";") if pd.notna(row.get("syllabus_topics")) else []
+                        topics = [t.strip() for t in str(row.get("syllabus_topics", "")).split(";") if t.strip()] \
+                            if pd.notna(row.get("syllabus_topics")) else []
                         conn.execute(
                             "INSERT OR REPLACE INTO courses (course_id, name, department, semester, description, syllabus_topics) VALUES (?,?,?,?,?,?)",
                             (str(row["course_id"]), str(row["name"]), str(row.get("department", "")),
@@ -481,43 +506,33 @@ elif page == "🔬 Similarity Analysis":
     if len(courses_list) < 2:
         st.warning("Need at least 2 courses. Go to Courses or Settings to add/load courses.")
     else:
-        threshold = st.slider("Overlap Threshold", 0.1, 1.0, 0.40, 0.05)
+        threshold = st.slider("Overlap Threshold", 0.1, 1.0, DEFAULT_THRESHOLD, 0.05)
         st.caption("TF-IDF measures lexical (word-level) similarity. It does not perfectly understand curriculum content.")
 
         if st.button("🚀 Run Similarity Analysis", type="primary"):
             with st.spinner("Computing TF-IDF similarity matrix..."):
                 result = compute_similarity(courses_list, threshold)
-            if result and result[0] is not None:
-                sim_matrix, pairs, high, labels = result
-                st.session_state["sim_result"] = (sim_matrix, pairs, high, labels, threshold)
-                st.success(f"Analysis complete! {len(high)} high-overlap pairs found.")
+            sim_matrix, pairs, high, labels = result
+            st.session_state["sim_result"] = (sim_matrix, pairs, high, labels, threshold)
+            st.success(f"Analysis complete! {len(high)} high-overlap pairs found.")
 
         if "sim_result" in st.session_state:
             sim_matrix, pairs, high, labels, th = st.session_state["sim_result"]
-            short_labels = [l.split(":")[0].strip() for l in labels]
 
-            import plotly.graph_objects as go
-            fig = go.Figure(data=go.Heatmap(
-                z=sim_matrix, x=short_labels, y=short_labels,
-                colorscale=[[0, '#ecfdf5'], [0.15, '#a7f3d0'], [0.3, '#fbbf24'], [0.5, '#f97316'], [0.7, '#dc2626'], [1.0, '#4338ca']],
-                text=np.round(sim_matrix * 100, 1).astype(str),
-                texttemplate="%{text}%", textfont={"size": 9},
-                zmin=0, zmax=1,
-            ))
-            fig.update_layout(title="Similarity Heatmap", height=550, xaxis_tickangle=-45)
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(build_heatmap(sim_matrix, labels, "Similarity Heatmap", height=560, show_colorbar=False),
+                            use_container_width=True)
 
             st.markdown("### Ranked Course Pairs")
             for i, p in enumerate(pairs[:20]):
                 sim_pct = p["similarity"] * 100
                 icon = "🔴" if sim_pct >= th * 100 else "🟡" if sim_pct >= 30 else "🟢"
                 terms = ", ".join(p["common_terms"][:5]) if p["common_terms"] else ""
-                st.markdown(f"{icon} **#{i+1}** {p['course1']} ({p['course1_name']}) ↔ {p['course2']} ({p['course2_name']}) — **{sim_pct:.1f}%** {f'| _{terms}_' if terms else ''}")
+                extra = f"| _{terms}_" if terms else ""
+                st.markdown(f"{icon} **#{i + 1}** {p['course1']} ({p['course1_name']}) ↔ {p['course2']} ({p['course2_name']}) — **{sim_pct:.1f}%** {extra}")
 
-            # Export
             csv_data = "Course 1,Course 1 Name,Course 2,Course 2 Name,Similarity,Common Terms\n"
             for p in pairs:
-                csv_data += f"{p['course1']},{p['course1_name']},{p['course2']},{p['course2_name']},{p['similarity']},\"{';'.join(p['common_terms'])}\"\n"
+                csv_data += f"{p['course1']},\"{p['course1_name']}\",{p['course2']},\"{p['course2_name']}\",{p['similarity']},\"{';'.join(p['common_terms'])}\"\n"
             st.download_button("📥 Download CSV", csv_data, "similarity_results.csv", "text/csv")
 
 # ─── Gap Analysis ───
@@ -530,18 +545,18 @@ elif page == "🎯 Gap Analysis":
     elif not courses_list:
         st.warning("No courses found. Add courses first.")
     else:
-        selected_curriculum = st.selectbox("Select Reference Curriculum",
-                                            options=curricula_list,
-                                            format_func=lambda c: f"{c['name']} ({len(c['topics'])} topics)")
+        selected_curriculum = st.selectbox(
+            "Select Reference Curriculum",
+            options=curricula_list,
+            format_func=lambda c: f"{c['name']} ({len(c['topics'])} topics)")
         if st.button("🎯 Run Gap Analysis", type="primary"):
             with st.spinner("Analyzing curriculum coverage..."):
-                ref_topics = selected_curriculum["topics"]
-                results = analyze_gaps(courses_list, ref_topics)
+                results = analyze_gaps(courses_list, selected_curriculum["topics"])
                 st.session_state["gap_result"] = results
 
         if "gap_result" in st.session_state:
             results = st.session_state["gap_result"]
-            covered = sum(1 for r in results if "Covered" in r["status"] and "Partial" not in r["status"])
+            covered = sum(1 for r in results if "Covered" in r["status"])
             partial = sum(1 for r in results if "Partial" in r["status"])
             missing = sum(1 for r in results if "Missing" in r["status"])
             total = len(results)
@@ -569,7 +584,7 @@ elif page == "🎯 Gap Analysis":
 # ─── Recommendations ───
 elif page == "💡 Recommendations":
     st.title("💡 Smart Recommendations")
-    st.caption("AI-generated suggestions based on similarity and gap analysis results.")
+    st.caption("Suggestions based on similarity and gap analysis results.")
 
     has_sim = "sim_result" in st.session_state
     has_gap = "gap_result" in st.session_state
@@ -586,20 +601,21 @@ elif page == "💡 Recommendations":
                 recs.append({
                     "type": "High Overlap",
                     "priority": priority,
-                    "desc": f"**{p['course1']}** and **{p['course2']}** share {p['similarity']*100:.1f}% content overlap ({terms})",
+                    "desc": f"**{p['course1']}** and **{p['course2']}** share {p['similarity'] * 100:.1f}% content overlap ({terms})",
                     "action": f"Review syllabi of {p['course1']} and {p['course2']} to establish clearer boundaries. Consider merging overlapping modules.",
                 })
-            # Sequencing recs
+            seq_count = 0
             for p in pairs:
                 if 0.30 <= p["similarity"] < th:
                     terms = ", ".join(p["common_terms"][:3]) if p["common_terms"] else "core topics"
                     recs.append({
                         "type": "Course Sequencing",
                         "priority": "🔵 Low",
-                        "desc": f"Moderate alignment ({p['similarity']*100:.1f}%) between **{p['course1']}** and **{p['course2']}** on {terms}",
+                        "desc": f"Moderate alignment ({p['similarity'] * 100:.1f}%) between **{p['course1']}** and **{p['course2']}** on {terms}",
                         "action": f"Verify prerequisite ordering between {p['course1']} and {p['course2']}.",
                     })
-                    if len([r for r in recs if r["type"] == "Course Sequencing"]) >= 2:
+                    seq_count += 1
+                    if seq_count >= 2:
                         break
 
         if has_gap:
@@ -621,17 +637,20 @@ elif page == "💡 Recommendations":
                     })
 
         if recs:
-            for i, rec in enumerate(recs):
+            for rec in recs:
                 st.markdown(f"""
-                **{rec['priority']} — {rec['type']}**
-                {rec['desc']}
-                > 💡 **Suggested Action:** {rec['action']}
-                ---
-                """)
+**{rec['priority']} — {rec['type']}**
+
+{rec['desc']}
+
+> 💡 **Suggested Action:** {rec['action']}
+
+---
+""")
         else:
             st.success("No issues detected! All courses have clear boundaries and good coverage.")
 
-        st.markdown('<div class="disclaimer">⚠️ These are AI-generated suggestions based on text similarity analysis. They require academic review and should not be treated as final curriculum decisions.</div>', unsafe_allow_html=True)
+        st.markdown('<div class="disclaimer">⚠️ These are suggestions based on text similarity analysis. They require academic review and should not be treated as final curriculum decisions.</div>', unsafe_allow_html=True)
 
 # ─── Settings ───
 elif page == "⚙️ Settings":
@@ -685,13 +704,13 @@ elif page == "⚙️ Settings":
     st.markdown("---")
     st.markdown("### About")
     st.markdown("""
-    **Course Description Similarity & Curriculum Gap Analyzer**
+**Course Description Similarity & Curriculum Gap Analyzer**
 
-    An NLP-powered web application that analyzes academic course descriptions to identify
-    semantic similarity, detect curriculum gaps, and generate evidence-based recommendations.
+An NLP-powered web application that analyzes academic course descriptions to identify
+similarity, detect curriculum gaps, and generate evidence-based recommendations.
 
-    **Technology Stack:** Python, Streamlit, scikit-learn (TF-IDF), NumPy, Pandas, Plotly, SQLite
+**Technology Stack:** Python, Streamlit, scikit-learn (TF-IDF), NumPy, Pandas, Plotly, SQLite
 
-    **Note:** TF-IDF measures lexical similarity. For semantic similarity, the full-stack version
-    supports sentence-transformers. All results are AI-generated suggestions requiring academic review.
-    """)
+**Note:** TF-IDF measures lexical similarity. For semantic similarity, the full-stack version
+supports sentence-transformers. All results are suggestions requiring academic review.
+""")
