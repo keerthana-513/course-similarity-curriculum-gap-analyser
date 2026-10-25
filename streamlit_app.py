@@ -367,6 +367,24 @@ st.markdown("""
         color: #BFDBFE; padding: 0.7rem; border-radius: 8px;
         font-size: 0.85rem; margin-top: 1rem;
     }
+    [data-testid="stSidebar"] {
+        background-color: #111622 !important;
+        border-right: 1px solid #2A3142;
+    }
+    [data-testid="stSidebar"] div[role="radiogroup"] label {
+        padding: 10px 14px;
+        border-radius: 10px;
+        margin-bottom: 4px;
+        font-size: 1.05rem;
+        width: 100%;
+    }
+    [data-testid="stSidebar"] div[role="radiogroup"] label:hover {
+        background: rgba(255, 255, 255, 0.06);
+    }
+    [data-testid="stSidebar"] div[role="radiogroup"] label:has(input:checked) {
+        background: rgba(108, 99, 255, 0.25);
+        font-weight: 600;
+    }
 </style>
 """, unsafe_allow_html=True)
 
